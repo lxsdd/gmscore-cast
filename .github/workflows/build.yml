@@ -1,76 +1,77 @@
-name: "Gradle build"
-permissions: {}
+# Public fork CI. Deliberately independent of upstream release/signing workflows.
+name: Cast FASTDEV
+
 on:
-  - pull_request
-  - workflow_dispatch
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cast-fastdev-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-    name: "Gradle build ${{ matrix.target }}"
+  cast-fastdev:
+    name: Cast core + framework (software only)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
-      GRADLE_MICROG_VERSION_WITHOUT_GIT: 1
-
-    strategy:
-      matrix:
-        target: [Debug, Release]
+      GRADLE_MICROG_VERSION_WITHOUT_GIT: '1'
 
     steps:
-      - name: "Free disk space"
-        run: |
-          # Deleting unneeded software packages
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /opt/hostedtoolcache/go
-
-          # Log available space
-          df -h
-
-      - name: "Checkout sources"
+      - name: Checkout
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 2
+          persist-credentials: false
 
-      - name: "Setup Java"
+      - name: Java 17
         uses: actions/setup-java@v6.0.1
         with:
-          distribution: "temurin"
-          java-version: "17"
+          distribution: temurin
+          java-version: '17'
 
-      - name: "Setup Gradle"
+      - name: Gradle cache
         uses: gradle/actions/setup-gradle@v6
-        with:
-          cache-encryption-key: ${{ secrets.GradleEncryptionKey }}
-          build-scan-publish: true
-          build-scan-terms-of-use-url: "https://gradle.com/help/legal-terms-of-use"
-          build-scan-terms-of-use-agree: "yes"
 
-      - name: "Setup matchers"
+      - name: Install pinned Android build inputs
+        shell: bash
         run: |
-          # Setting up matchers...
+          set -euo pipefail
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-36" "build-tools;35.0.0"
 
-          matchers_dir='${{ github.workspace }}/.github/matchers'
-          matcher_list()
-          {
-            echo 'gradle-build-matcher.json'
-            echo 'gradle-build-kotlin-error-matcher.json'
-          }
+      - name: Source diff sanity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check HEAD^ HEAD
 
-          matcher_list | while IFS='' read -r NAME; do
-            if test -f "${matchers_dir:?}/${NAME:?}"; then
-              echo "::add-matcher::${matchers_dir:?}/${NAME:?}"
-              echo "Matcher configured: ${NAME:?}"
-            fi
-          done
+      - name: Cast unit tests and debug/release compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew \
+            :play-services-cast-core:testDebugUnitTest \
+            :play-services-cast-framework-core:testDebugUnitTest \
+            :play-services-cast-core:compileDebugJavaWithJavac \
+            :play-services-cast-core:compileReleaseJavaWithJavac \
+            :play-services-cast-framework-core:compileDebugJavaWithJavac \
+            :play-services-cast-framework-core:compileReleaseJavaWithJavac \
+            --no-daemon
 
-      - name: "Execute Gradle assemble"
-        run: "./gradlew assemble${{ matrix.target }}"
-
-      - name: "Execute Gradle lint"
-        run: "./gradlew lint${{ matrix.target }}"
-
-#      - name: "Upload APK artifacts"
-#        uses: actions/upload-artifact@v7
-#        with:
-#          name: microg-apks-${{ matrix.target }}
-#          path: "play-services-core/build/outputs/apk/*/*/*.apk"
-#          if-no-files-found: error
+      - name: Cast debug/release lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew \
+            :play-services-cast-core:lintDebug \
+            :play-services-cast-core:lintRelease \
+            :play-services-cast-framework-core:lintDebug \
+            :play-services-cast-framework-core:lintRelease \
+            --no-daemon
