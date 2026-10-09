@@ -95,4 +95,51 @@ public class CastRouteDiscoveryStateTest {
             pool.shutdownNow();
         }
     }
+
+    @Test
+    public void rediscoveryUpdatesCapabilitiesWithoutChangingRouteId() {
+        CastRouteDiscoveryState<Integer> state = new CastRouteDiscoveryState<>();
+        assertTrue(state.putDevice("route-id", "service-a", 4, false));
+        assertEquals(Integer.valueOf(4), state.getDevice("route-id"));
+
+        assertFalse(state.putDevice("route-id", "service-a", 5, false));
+        assertEquals(Integer.valueOf(4), state.getDevice("route-id"));
+
+        assertTrue(state.putDevice("route-id", "service-a", 5, true));
+        assertEquals(Integer.valueOf(5), state.getDevice("route-id"));
+        assertEquals(1, state.snapshot().devices.size());
+    }
+
+    @Test
+    public void serviceAliasesDoNotRemoveAStillAdvertisedReceiver() {
+        CastRouteDiscoveryState<String> state = new CastRouteDiscoveryState<>();
+        state.putDevice("route", "service-old", "endpoint", false);
+        state.putDevice("route", "service-new", "endpoint", false);
+
+        state.forgetService("service-old");
+        assertEquals("endpoint", state.getDevice("route"));
+        state.forgetService("service-new");
+        assertNull(state.getDevice("route"));
+    }
+
+    @Test
+    public void serviceNameReusedByNewRouteRemovesOrphanedOldRoute() {
+        CastRouteDiscoveryState<String> state = new CastRouteDiscoveryState<>();
+        state.putDevice("old", "name", "first", false);
+        state.putDevice("new", "name", "second", false);
+        assertNull(state.getDevice("old"));
+        assertEquals("second", state.getDevice("new"));
+    }
+
+    @Test
+    public void chooserReopenReplacesInsteadOfAccumulatingCategories() {
+        CastRouteDiscoveryState<String> state = new CastRouteDiscoveryState<>();
+        assertTrue(state.replaceCategories(java.util.Arrays.asList("video", "audio", "audio")));
+        assertEquals(java.util.Arrays.asList("video", "audio"), state.snapshot().categories);
+        assertFalse(state.replaceCategories(java.util.Arrays.asList("video", "audio")));
+        assertTrue(state.replaceCategories(java.util.Collections.singletonList("audio")));
+        assertEquals(java.util.Collections.singletonList("audio"), state.snapshot().categories);
+        assertTrue(state.replaceCategories(null));
+        assertTrue(state.snapshot().categories.isEmpty());
+    }
 }

@@ -5,8 +5,10 @@ package org.microg.gms.cast;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Owns the collection state consumed by Cast route publication.
@@ -42,20 +44,50 @@ final class CastRouteDiscoveryState<T> {
 
     synchronized void rememberIfAbsent(String id, String serviceName, T device) {
         if (!devices.containsKey(id)) {
-            devices.put(id, device);
-            serviceCastIds.put(serviceName, id);
+            putDevice(id, serviceName, device, false);
         }
+    }
+
+    /**
+     * A later DNS-SD advertisement can change capabilities or the endpoint of
+     * an existing ID. Reconcile the service-name mapping atomically.
+     */
+    synchronized boolean putDevice(String id, String serviceName, T device,
+                                   boolean replaceExisting) {
+        T oldDevice = devices.get(id);
+        boolean changed = oldDevice == null || replaceExisting;
+        if (changed) devices.put(id, device);
+        String previousId = serviceCastIds.put(serviceName, id);
+        if (previousId != null && !Objects.equals(previousId, id)
+                && !serviceCastIds.containsValue(previousId)) {
+            devices.remove(previousId);
+        }
+        return changed || !Objects.equals(previousId, id);
     }
 
     synchronized void forgetService(String serviceName) {
         String id = serviceCastIds.remove(serviceName);
-        if (id != null) {
+        if (id != null && !serviceCastIds.containsValue(id)) {
             devices.remove(id);
         }
     }
 
     synchronized void addCategory(String category) {
         categories.add(category);
+    }
+
+    /** A chooser reopen is a new selector, not an append-only filter history. */
+    synchronized boolean replaceCategories(List<String> requested) {
+        List<String> next = new ArrayList<>();
+        if (requested != null) {
+            for (String category : new LinkedHashSet<>(requested)) {
+                if (category != null && !category.isEmpty()) next.add(category);
+            }
+        }
+        if (categories.equals(next)) return false;
+        categories.clear();
+        categories.addAll(next);
+        return true;
     }
 
     synchronized Snapshot<T> snapshot() {

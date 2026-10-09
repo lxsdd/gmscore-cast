@@ -50,6 +50,7 @@ import java.lang.Runnable;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Map;
+import java.util.Objects;
 
 public class CastMediaRouteProvider extends MediaRouteProvider {
     private static final String TAG = CastMediaRouteProvider.class.getSimpleName();
@@ -73,20 +74,7 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
     }
     private State state = State.NOT_DISCOVERING;
 
-    private static final ArrayList<IntentFilter> BASE_CONTROL_FILTERS = new ArrayList<IntentFilter>();
-    static {
-        IntentFilter filter;
-
-        filter = new IntentFilter();
-        filter.addCategory(CastMediaControlIntent.CATEGORY_CAST);
-        BASE_CONTROL_FILTERS.add(filter);
-
-        filter = new IntentFilter();
-        filter.addCategory(MediaControlIntent.CATEGORY_REMOTE_PLAYBACK);
-        filter.addAction(MediaControlIntent.ACTION_PLAY);
-        filter.addDataScheme("http");
-        filter.addDataScheme("https");
-        String[] types = {
+    private static final String[] REMOTE_PLAYBACK_TYPES = {
             "image/jpeg",
             "image/pjpeg",
             "image/jpg",
@@ -116,14 +104,14 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
             "application/vnd.apple.mpegurl",
             "application/dash+xml",
             "application/vnd.ms-sstr+xml",
-        };
-        for (String type : types) {
-            try {
-                filter.addDataType(type);
-            } catch (IntentFilter.MalformedMimeTypeException ex) {
-                Log.e(TAG, "Error adding filter type " + type);
-            }
-        }
+    };
+
+    private static final ArrayList<IntentFilter> BASE_CONTROL_FILTERS = new ArrayList<IntentFilter>();
+    static {
+        IntentFilter filter;
+
+        filter = new IntentFilter();
+        filter.addCategory(CastMediaControlIntent.CATEGORY_CAST);
         BASE_CONTROL_FILTERS.add(filter);
 
         filter = new IntentFilter();
@@ -343,9 +331,10 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
             String modelName = new String(attributes.get("md"), "UTF-8");
             String iconPath = new String(attributes.get("ic"), "UTF-8");
             int status = Integer.parseInt(new String(attributes.get("st"), "UTF-8"));
+            int capabilities = CastRouteCapabilities.fromDnsSdAttributes(attributes);
 
             onChromeCastDiscovered(id, name, host, port, deviceVersion,
-                    friendlyName, modelName, iconPath, status);
+                    friendlyName, modelName, iconPath, status, capabilities);
         } catch (UnsupportedEncodingException | NullPointerException | NumberFormatException e) {
             Log.w(TAG, "Ignoring malformed Cast DNS-SD TXT record", e);
         }
@@ -354,16 +343,20 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
     private void onChromeCastDiscovered(
             String id, String name, InetAddress host, int port, String
             deviceVersion, String friendlyName, String modelName, String
-            iconPath, int status) {
-        if (routeState.getDevice(id) == null) {
-            // TODO: Capabilities
-            int capabilities = CastDevice.CAPABILITY_VIDEO_OUT | CastDevice.CAPABILITY_AUDIO_OUT;
-
-            CastDevice castDevice = new CastDevice(id, name, host, port, deviceVersion, friendlyName, modelName, iconPath, status, capabilities);
-            routeState.rememberIfAbsent(id, name, castDevice);
+            iconPath, int status, int capabilities) {
+        CastDevice known = routeState.getDevice(id);
+        boolean refresh = known == null
+                || !Objects.equals(known.getAddress(), host.getHostAddress())
+                || known.getServicePort() != port
+                || known.getCapabilities() != capabilities
+                || !Objects.equals(known.getFriendlyName(), friendlyName)
+                || !Objects.equals(known.getModelName(), modelName);
+        CastDevice castDevice = refresh
+                ? new CastDevice(id, name, host, port, deviceVersion,
+                        friendlyName, modelName, iconPath, status, capabilities) : known;
+        if (routeState.putDevice(id, name, castDevice, refresh)) {
+            publishRoutesInMainThread();
         }
-
-        publishRoutesInMainThread();
     }
 
     private void onChromeCastLost(String name) {
@@ -381,14 +374,18 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
 
     private void handleDiscoveryRequest(MediaRouteDiscoveryRequest request) {
         scanRequested = request != null && request.isValid() && request.isActiveScan();
-        if (scanRequested) {
-            if (request.getSelector() != null) {
-                for (String category : request.getSelector().getControlCategories()) {
-                    if (CastMediaControlIntent.isCategoryForCast(category)) {
-                        routeState.addCategory(category);
-                    }
+        List<String> categories = new ArrayList<>();
+        if (scanRequested && request.getSelector() != null) {
+            for (String category : request.getSelector().getControlCategories()) {
+                if (CastMediaControlIntent.isCategoryForCast(category)) {
+                    categories.add(category);
                 }
             }
+        }
+        if (routeState.replaceCategories(categories)) {
+            publishRoutesInMainThread();
+        }
+        if (scanRequested) {
             startDiscoveryIfRequested();
         } else {
             resolveQueue.endDiscovery();
@@ -423,11 +420,30 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
         });
     }
 
+    /** Advertise only media output the receiver claims; unknown keeps legacy compatibility. */
+    private static IntentFilter createRemotePlaybackFilter(int capabilities) {
+        IntentFilter filter = new IntentFilter();
+        filter.addCategory(MediaControlIntent.CATEGORY_REMOTE_PLAYBACK);
+        filter.addAction(MediaControlIntent.ACTION_PLAY);
+        filter.addDataScheme("http");
+        filter.addDataScheme("https");
+        for (String mimeType : REMOTE_PLAYBACK_TYPES) {
+            if (!CastRouteCapabilities.advertisesMimeType(capabilities, mimeType)) continue;
+            try {
+                filter.addDataType(mimeType);
+            } catch (IntentFilter.MalformedMimeTypeException e) {
+                Log.w(TAG, "Ignoring malformed Cast remote playback MIME type", e);
+            }
+        }
+        return filter;
+    }
+
     private void publishRoutes() {
         CastRouteDiscoveryState.Snapshot<CastDevice> snapshot = routeState.snapshot();
         MediaRouteProviderDescriptor.Builder builder = new MediaRouteProviderDescriptor.Builder();
         for (CastDevice castDevice : snapshot.devices) {
             ArrayList<IntentFilter> controlFilters = new ArrayList<IntentFilter>(BASE_CONTROL_FILTERS);
+            controlFilters.add(createRemotePlaybackFilter(castDevice.getCapabilities()));
             // Include any app-specific control filters that have been requested.
             // TODO: Do we need to check with the device?
             for (String category : snapshot.categories) {
@@ -443,7 +459,7 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
                 castDevice.getFriendlyName())
                 .setDescription(castDevice.getModelName())
                 .addControlFilters(controlFilters)
-                .setDeviceType(MediaRouter.RouteInfo.DEVICE_TYPE_TV)
+                .setDeviceType(CastRouteCapabilities.mediaRouterDeviceType(castDevice.getCapabilities()))
                 .setPlaybackType(MediaRouter.RouteInfo.PLAYBACK_TYPE_REMOTE)
                 .setVolumeHandling(MediaRouter.RouteInfo.PLAYBACK_VOLUME_FIXED)
                 .setVolumeMax(20)
