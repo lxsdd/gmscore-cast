@@ -13,82 +13,126 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.microg.gms.cast;
 
-import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
-import android.net.Uri;
 import android.os.Bundle;
-import android.os.AsyncTask;
-import android.os.Handler;
-import android.util.Log;
 
 import androidx.mediarouter.media.MediaRouteProvider;
 import androidx.mediarouter.media.MediaRouter;
 
-import com.google.android.gms.common.images.WebImage;
-import com.google.android.gms.cast.CastDevice;
+import com.google.android.gms.cast.internal.CastRouteLifecycleRegistry;
 
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.Inet4Address;
-import java.net.UnknownHostException;
-import java.io.IOException;
-import java.lang.Thread;
-import java.lang.Runnable;
-import java.util.ArrayList;
-import java.util.Map;
-import java.util.HashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-import su.litvak.chromecast.api.v2.ChromeCast;
-import su.litvak.chromecast.api.v2.ChromeCasts;
-import su.litvak.chromecast.api.v2.Status;
-import su.litvak.chromecast.api.v2.ChromeCastsListener;
-
+/**
+ * MediaRouter-side controller. The actual CastV2 socket is owned by
+ * CastDeviceControllerImpl, not by this class; selecting a route only
+ * registers a generation and starts the expected connection lifecycle.
+ */
 public class CastMediaRouteController extends MediaRouteProvider.RouteController {
-    private static final String TAG = CastMediaRouteController.class.getSimpleName();
+    static final String ACTION_SET_MUTED = "org.microg.gms.cast.action.SET_MUTED";
+    static final String ACTION_TOGGLE_MUTED = "org.microg.gms.cast.action.TOGGLE_MUTED";
+    static final String EXTRA_MUTED = "org.microg.gms.cast.extra.MUTED";
 
-    private CastMediaRouteProvider provider;
-    private String routeId;
-    private ChromeCast chromecast;
+    private static final ExecutorService VOLUME_COMMANDS =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread thread = new Thread(r, "CastRouteVolume");
+                thread.setDaemon(true);
+                return thread;
+            });
 
-    public CastMediaRouteController(CastMediaRouteProvider provider, String routeId, String address) {
-        super();
+    private final CastMediaRouteProvider provider;
+    private final String routeId;
+    private final long controllerGeneration;
+    private final boolean audioOnly;
+    private volatile boolean released;
 
+    public CastMediaRouteController(CastMediaRouteProvider provider, String routeId,
+                                    long controllerGeneration, boolean audioOnly) {
         this.provider = provider;
         this.routeId = routeId;
-        this.chromecast = new ChromeCast(address);
+        this.controllerGeneration = controllerGeneration;
+        this.audioOnly = audioOnly;
     }
 
+    @Override
     public boolean onControlRequest(Intent intent, MediaRouter.ControlRequestCallback callback) {
-        Log.d(TAG, "unimplemented Method: onControlRequest: " + this.routeId);
-        return false;
+        if (intent == null || released || !audioOnly) return false;
+        final String action = intent.getAction();
+        if (!ACTION_SET_MUTED.equals(action) && !ACTION_TOGGLE_MUTED.equals(action)) {
+            return false;
+        }
+        Object requestedMuted;
+        try {
+            Bundle extras = intent.getExtras();
+            if (ACTION_TOGGLE_MUTED.equals(action) && extras != null && !extras.isEmpty()) {
+                return false;
+            }
+            requestedMuted = extras == null ? null : extras.get(EXTRA_MUTED);
+        } catch (RuntimeException invalidExtras) {
+            return false;
+        }
+        boolean applied = handleMuteControlRequest(action, requestedMuted);
+        if (applied && callback != null) callback.onResult(new Bundle());
+        return applied;
     }
 
-    public void onRelease() {
-        // Idempotent even if Android has already delivered onUnselect.
-        provider.onRouteControllerDeselected(routeId, this);
+    boolean handleMuteControlRequest(String action, Object mutedValue) {
+        if (released || !audioOnly) return false;
+        if (ACTION_TOGGLE_MUTED.equals(action)) {
+            return mutedValue == null
+                    && CastRouteVolumeRegistry.toggleMuted(routeId, controllerGeneration);
+        }
+        return ACTION_SET_MUTED.equals(action) && mutedValue instanceof Boolean
+                && CastRouteVolumeRegistry.setMuted(
+                        routeId, controllerGeneration, (Boolean) mutedValue);
     }
 
+    @Override
     public void onSelect() {
+        if (released) return;
         provider.onRouteControllerSelected(routeId, this);
+        CastRouteLifecycleRegistry.markConnecting(controllerGeneration);
     }
 
-    public void onSetVolume(int volume) {
-        Log.d(TAG, "unimplemented Method: onSetVolume: " + this.routeId);
-    }
-
+    @Override
     public void onUnselect() {
+        if (released) return;
+        CastRouteLifecycleRegistry.markDisconnected(controllerGeneration);
         provider.onRouteControllerDeselected(routeId, this);
     }
 
+    @Override
     public void onUnselect(int reason) {
         onUnselect();
     }
 
+    @Override
+    public void onRelease() {
+        if (released) return;
+        released = true;
+        CastRouteLifecycleRegistry.controllerReleased(controllerGeneration);
+        provider.onRouteControllerDeselected(routeId, this);
+        CastRouteLifecycleRegistry.forget(controllerGeneration);
+    }
+
+    @Override
+    public void onSetVolume(int volume) {
+        if (released) return;
+        VOLUME_COMMANDS.execute(() -> {
+            if (!released) CastRouteVolumeRegistry.setVolume(
+                    routeId, controllerGeneration, volume);
+        });
+    }
+
+    @Override
     public void onUpdateVolume(int delta) {
-        Log.d(TAG, "unimplemented Method: onUpdateVolume: " + this.routeId);
+        if (released) return;
+        VOLUME_COMMANDS.execute(() -> {
+            if (!released) CastRouteVolumeRegistry.updateVolume(
+                    routeId, controllerGeneration, delta);
+        });
     }
 }
