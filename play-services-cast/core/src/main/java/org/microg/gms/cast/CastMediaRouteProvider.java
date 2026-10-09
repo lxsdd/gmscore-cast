@@ -49,18 +49,16 @@ import java.lang.Runnable;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Map;
-import java.util.HashMap;
 
 public class CastMediaRouteProvider extends MediaRouteProvider {
     private static final String TAG = CastMediaRouteProvider.class.getSimpleName();
 
-    private Map<String, CastDevice> castDevices = new HashMap<String, CastDevice>();
-    private Map<String, String> serviceCastIds = new HashMap<String, String>();
+    private final CastRouteDiscoveryState<CastDevice> routeState = new CastRouteDiscoveryState<>();
 
     private NsdManager mNsdManager;
     private NsdManager.DiscoveryListener mDiscoveryListener;
 
-    private List<String> customCategories = new ArrayList<String>();
+
 
     private enum State {
         NOT_DISCOVERING,
@@ -257,23 +255,19 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
             String id, String name, InetAddress host, int port, String
             deviceVersion, String friendlyName, String modelName, String
             iconPath, int status) {
-        if (!this.castDevices.containsKey(id)) {
+        if (routeState.getDevice(id) == null) {
             // TODO: Capabilities
             int capabilities = CastDevice.CAPABILITY_VIDEO_OUT | CastDevice.CAPABILITY_AUDIO_OUT;
 
             CastDevice castDevice = new CastDevice(id, name, host, port, deviceVersion, friendlyName, modelName, iconPath, status, capabilities);
-            this.castDevices.put(id, castDevice);
-            this.serviceCastIds.put(name, id);
+            routeState.rememberIfAbsent(id, name, castDevice);
         }
 
         publishRoutesInMainThread();
     }
 
     private void onChromeCastLost(String name) {
-        String id = this.serviceCastIds.remove(name);
-        if (id != null) {
-            this.castDevices.remove(id);
-        }
+        routeState.forgetService(name);
 
         publishRoutesInMainThread();
     }
@@ -289,7 +283,7 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
             if (request.getSelector() != null) {
                 for (String category : request.getSelector().getControlCategories()) {
                     if (CastMediaControlIntent.isCategoryForCast(category)) {
-                        this.customCategories.add(category);
+                        routeState.addCategory(category);
                     }
                 }
             }
@@ -307,7 +301,7 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
 
     @Override
     public RouteController onCreateRouteController(String routeId) {
-        CastDevice castDevice = this.castDevices.get(routeId);
+        CastDevice castDevice = routeState.getDevice(routeId);
         if (castDevice == null) {
             return null;
         }
@@ -325,12 +319,13 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
     }
 
     private void publishRoutes() {
+        CastRouteDiscoveryState.Snapshot<CastDevice> snapshot = routeState.snapshot();
         MediaRouteProviderDescriptor.Builder builder = new MediaRouteProviderDescriptor.Builder();
-        for (CastDevice castDevice : this.castDevices.values()) {
+        for (CastDevice castDevice : snapshot.devices) {
             ArrayList<IntentFilter> controlFilters = new ArrayList<IntentFilter>(BASE_CONTROL_FILTERS);
             // Include any app-specific control filters that have been requested.
             // TODO: Do we need to check with the device?
-            for (String category : this.customCategories) {
+            for (String category : snapshot.categories) {
                 IntentFilter filter = new IntentFilter();
                 filter.addCategory(category);
                 controlFilters.add(filter);
