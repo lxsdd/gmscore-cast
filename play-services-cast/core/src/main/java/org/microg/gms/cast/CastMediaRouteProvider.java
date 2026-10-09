@@ -38,6 +38,7 @@ import androidx.mediarouter.media.MediaRouter;
 import com.google.android.gms.common.images.WebImage;
 import com.google.android.gms.cast.CastDevice;
 import com.google.android.gms.cast.CastMediaControlIntent;
+import com.google.android.gms.cast.internal.CastRouteLifecycleRegistry;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -56,6 +57,13 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
     private static final String TAG = CastMediaRouteProvider.class.getSimpleName();
 
     private final CastRouteDiscoveryState<CastDevice> routeState = new CastRouteDiscoveryState<>();
+    private final CastRouteLifecycleRegistry.Listener lifecycleListener =
+            (routeId, generation, connectionState) -> {
+        if (routeState.getDevice(routeId) != null) publishRoutesInMainThread();
+    };
+    private final CastRouteVolumeRegistry.Listener volumeListener = routeId -> {
+        if (routeState.getDevice(routeId) != null) publishRoutesInMainThread();
+    };
 
     private NsdManager mNsdManager;
     private NsdManager.DiscoveryListener mDiscoveryListener;
@@ -168,6 +176,8 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
     @SuppressLint("NewApi")
     public CastMediaRouteProvider(Context context) {
         super(context);
+        CastRouteLifecycleRegistry.addListener(lifecycleListener);
+        CastRouteVolumeRegistry.addListener(volumeListener);
 
         if (android.os.Build.VERSION.SDK_INT < 16) {
             Log.i(TAG, "Cast discovery disabled. Android SDK version 16 or higher required.");
@@ -404,10 +414,11 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
     @Override
     public RouteController onCreateRouteController(String routeId) {
         CastDevice castDevice = routeState.getDevice(routeId);
-        if (castDevice == null) {
-            return null;
-        }
-        return new CastMediaRouteController(this, routeId, castDevice.getAddress());
+        if (castDevice == null) return null;
+        long generation = CastRouteLifecycleRegistry.controllerCreated(routeId);
+        publishRoutesInMainThread();
+        return new CastMediaRouteController(this, routeId, generation,
+                CastRouteCapabilities.isAudioOnly(castDevice.getCapabilities()));
     }
 
     void onRouteControllerSelected(String routeId, Object token) {
@@ -469,12 +480,16 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
                 .addControlFilters(controlFilters)
                 .setDeviceType(CastRouteCapabilities.mediaRouterDeviceType(castDevice.getCapabilities()))
                 .setPlaybackType(MediaRouter.RouteInfo.PLAYBACK_TYPE_REMOTE)
-                .setVolumeHandling(MediaRouter.RouteInfo.PLAYBACK_VOLUME_FIXED)
-                .setVolumeMax(20)
-                .setVolume(0)
+                .setVolumeHandling(CastRouteCapabilities.has(
+                        castDevice.getCapabilities(), CastDevice.CAPABILITY_AUDIO_OUT)
+                        ? MediaRouter.RouteInfo.PLAYBACK_VOLUME_VARIABLE
+                        : MediaRouter.RouteInfo.PLAYBACK_VOLUME_FIXED)
+                .setVolumeMax(CastRouteVolumeRegistry.MAX_ROUTE_VOLUME)
+                .setVolume(CastRouteVolumeRegistry.volumeForRoute(castDevice.getDeviceId()))
                 .setEnabled(true)
                 .setExtras(extras)
-                .setConnectionState(MediaRouter.RouteInfo.CONNECTION_STATE_DISCONNECTED)
+                .setConnectionState(CastRouteLifecycleRegistry.snapshotForRoute(
+                        castDevice.getDeviceId()).connectionState)
                 .build();
             builder.addRoute(route);
         }
