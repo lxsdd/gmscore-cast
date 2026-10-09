@@ -16,31 +16,22 @@
 
 package org.microg.gms.cast;
 
-import android.os.IBinder;
 import android.os.RemoteException;
-import android.os.Parcel;
-import android.util.ArrayMap;
-import android.util.Log;
 
 import com.google.android.gms.cast.CastDevice;
 import com.google.android.gms.common.Feature;
+import com.google.android.gms.common.api.CommonStatusCodes;
 import com.google.android.gms.common.internal.ConnectionInfo;
-import com.google.android.gms.cast.internal.ICastDeviceControllerListener;
 import com.google.android.gms.common.internal.GetServiceRequest;
-import com.google.android.gms.common.internal.BinderWrapper;
 import com.google.android.gms.common.internal.IGmsCallbacks;
 
 import org.microg.gms.BaseService;
 import org.microg.gms.common.GmsService;
 
-import su.litvak.chromecast.api.v2.ChromeCast;
-import su.litvak.chromecast.api.v2.ChromeCasts;
-import su.litvak.chromecast.api.v2.Status;
-import su.litvak.chromecast.api.v2.ChromeCastsListener;
-
 public class CastDeviceControllerService extends BaseService {
-    private static final String TAG = CastDeviceControllerService.class.getSimpleName();
-
+    private static final Feature[] CAST_FEATURES = {
+            new Feature("cxless_client_minimal", 1, true)
+    };
     private static final Feature[] CAST_API_FEATURES = {
             new Feature("module_flag_control", 1, true),
             new Feature("analytics_proto_enum_translation", 1, true),
@@ -48,24 +39,54 @@ public class CastDeviceControllerService extends BaseService {
     };
 
     public CastDeviceControllerService() {
+        // Modern clients use the same Android service entry point for both the device-bound
+        // controller (CAST) and the device-independent capability service (CAST_API).
         super("GmsCastDeviceControllerSvc", GmsService.CAST, GmsService.CAST_API);
     }
 
     @Override
-    public void handleServiceRequest(IGmsCallbacks callback, GetServiceRequest request,
-                                     GmsService service) throws RemoteException {
-        if (CastApiRequestRouting.useDeviceIndependentService(
-                service == GmsService.CAST_API,
-                CastDevice.getFromBundle(request.extras) != null)) {
-            ConnectionInfo info = new ConnectionInfo();
+    public void handleServiceRequest(IGmsCallbacks callback, GetServiceRequest request, GmsService service) throws RemoteException {
+        ConnectionInfo info = new ConnectionInfo();
+        CastDevice requestedDevice = CastDevice.getFromBundle(request.extras);
+        if (service == GmsService.CAST_API && requestedDevice == null) {
+            // CAST_API is a device-independent capability service. In particular, current clients
+            // query FLAG_ENABLE_CONNECT_WITH_OPTIONS here before creating a separate, device-bound
+            // CAST request. Older clients may provide a device directly on CAST_API; keep routing
+            // those requests to the connectionless device controller below.
             info.features = CAST_API_FEATURES;
             callback.onPostInitCompleteWithConnectionInfo(0, new CastServiceImpl(), info);
             return;
         }
+        // A device-bound CAST service must not pretend to have connected without a device.
+        // Return a failure rather than constructing a transport with a missing endpoint.
+        if (requestedDevice == null) {
+            info.features = CAST_FEATURES;
+            callback.onPostInitCompleteWithConnectionInfo(
+                    CommonStatusCodes.NETWORK_ERROR, null, info);
+            return;
+        }
+        // Only advertise the connectionless handshake implemented by CastDeviceControllerImpl.
+        // connectWithOptions is intentionally not advertised.
+        info.features = CAST_FEATURES;
+        CastDeviceControllerImpl controller =
+                new CastDeviceControllerImpl(this, request.packageName, request.extras);
 
-        // Keep legacy device-bound CAST behavior unchanged until its separate
-        // transport/connection-readiness PR is qualified.
-        callback.onPostInitComplete(0,
-                new CastDeviceControllerImpl(this, request.packageName, request.extras), null);
+        if (!controller.hasInitialListener()) {
+            // Connectionless clients receive the Binder first, then set their listener, call
+            // connect(), and wait for onConnectedWithResult before treating the receiver as ready.
+            callback.onPostInitCompleteWithConnectionInfo(0, controller, info);
+            return;
+        }
+
+        // Legacy Cast.API clients put the listener into the service request and interpret successful
+        // service init as an already established device connection. Never report success before the
+        // CastV2 transport has actually connected.
+        int statusCode = controller.connectBeforeInit();
+        if (statusCode == 0) {
+            callback.onPostInitCompleteWithConnectionInfo(0, controller, info);
+        } else {
+            controller.disconnect();
+            callback.onPostInitCompleteWithConnectionInfo(statusCode, null, info);
+        }
     }
 }
