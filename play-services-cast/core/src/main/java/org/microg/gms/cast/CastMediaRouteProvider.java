@@ -25,6 +25,7 @@ import android.net.nsd.NsdServiceInfo;
 import android.os.Bundle;
 import android.os.AsyncTask;
 import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import androidx.mediarouter.media.MediaControlIntent;
@@ -57,6 +58,10 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
 
     private NsdManager mNsdManager;
     private NsdManager.DiscoveryListener mDiscoveryListener;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final CastDnsSdResolveQueue<NsdServiceInfo> resolveQueue =
+            new CastDnsSdResolveQueue<>();
+    private boolean scanRequested;
 
 
 
@@ -183,72 +188,167 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
 
         mNsdManager = (NsdManager)context.getApplicationContext().getSystemService(Context.NSD_SERVICE);
 
-        mDiscoveryListener = new NsdManager.DiscoveryListener() {
+    }
 
+    private void runOnMain(Runnable task) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            task.run();
+        } else {
+            mainHandler.post(task);
+        }
+    }
+
+    private NsdManager.DiscoveryListener newDiscoveryListener(final long scanGeneration) {
+        return new NsdManager.DiscoveryListener() {
             @Override
-            public void onDiscoveryStarted(String regType) {
-                CastMediaRouteProvider.this.state = State.DISCOVERING;
-            }
-
-            @Override
-            public void onServiceFound(NsdServiceInfo service) {
-                mNsdManager.resolveService(service, new NsdManager.ResolveListener() {
-                    @Override
-                    public void onResolveFailed(NsdServiceInfo serviceInfo, int errorCode) {
-                        if (errorCode == NsdManager.FAILURE_ALREADY_ACTIVE) {
-                            return;
-                        }
-                        Log.e(TAG, "DiscoveryListener Resolve failed. Error code " + errorCode);
-                    }
-
-                    @Override
-                    public void onServiceResolved(NsdServiceInfo serviceInfo) {
-                        String name = serviceInfo.getServiceName();
-                        InetAddress host = serviceInfo.getHost();
-                        int port = serviceInfo.getPort();
-                        Map<String, byte[]> attributes = serviceInfo.getAttributes();
-                        if (attributes == null) {
-                            Log.e(TAG, "Error getting service attributes from DNS-SD response");
-                            return;
-                        }
-                        try {
-                            String id = new String(attributes.get("id"), "UTF-8");
-                            String deviceVersion = new String(attributes.get("ve"), "UTF-8");
-                            String friendlyName = new String(attributes.get("fn"), "UTF-8");
-                            String modelName = new String(attributes.get("md"), "UTF-8");
-                            String iconPath = new String(attributes.get("ic"), "UTF-8");
-                            int status = Integer.parseInt(new String(attributes.get("st"), "UTF-8"));
-
-                            onChromeCastDiscovered(id, name, host, port, deviceVersion, friendlyName, modelName, iconPath, status);
-                        } catch (UnsupportedEncodingException | NullPointerException ex) {
-                            Log.e(TAG, "Error getting cast details from DNS-SD response", ex);
-                            return;
-                        }
+            public void onDiscoveryStarted(String serviceType) {
+                runOnMain(() -> {
+                    if (mDiscoveryListener == this
+                            && resolveQueue.isDiscoveryCurrent(scanGeneration)
+                            && state == State.DISCOVERY_REQUESTED) {
+                        state = State.DISCOVERING;
                     }
                 });
             }
 
             @Override
-            public void onServiceLost(NsdServiceInfo serviceInfo) {
-                String name = serviceInfo.getServiceName();
-                onChromeCastLost(name);
+            public void onServiceFound(NsdServiceInfo service) {
+                runOnMain(() -> {
+                    if (mDiscoveryListener != this
+                            || !resolveQueue.isDiscoveryCurrent(scanGeneration)) return;
+                    resolveQueue.found(service.getServiceName(), service);
+                    resolveNext();
+                });
+            }
+
+            @Override
+            public void onServiceLost(NsdServiceInfo service) {
+                runOnMain(() -> {
+                    if (mDiscoveryListener != this
+                            || !resolveQueue.isDiscoveryCurrent(scanGeneration)) return;
+                    resolveQueue.lost(service.getServiceName());
+                    onChromeCastLost(service.getServiceName());
+                });
             }
 
             @Override
             public void onDiscoveryStopped(String serviceType) {
-                CastMediaRouteProvider.this.state = State.NOT_DISCOVERING;
+                runOnMain(() -> {
+                    if (mDiscoveryListener != this) return;
+                    resolveQueue.endDiscovery();
+                    state = State.NOT_DISCOVERING;
+                    mDiscoveryListener = null;
+                    startDiscoveryIfRequested();
+                });
             }
 
             @Override
             public void onStartDiscoveryFailed(String serviceType, int errorCode) {
-                CastMediaRouteProvider.this.state = State.NOT_DISCOVERING;
+                runOnMain(() -> {
+                    if (mDiscoveryListener != this) return;
+                    Log.w(TAG, "Cast DNS-SD start failed: " + errorCode);
+                    resolveQueue.endDiscovery();
+                    state = State.NOT_DISCOVERING;
+                    mDiscoveryListener = null;
+                });
             }
 
             @Override
             public void onStopDiscoveryFailed(String serviceType, int errorCode) {
-                CastMediaRouteProvider.this.state = State.DISCOVERING;
+                runOnMain(() -> {
+                    if (mDiscoveryListener != this) return;
+                    Log.w(TAG, "Cast DNS-SD stop failed: " + errorCode);
+                    // The framework still owns this listener. Do not start a
+                    // new discovery until the old listener has stopped.
+                    state = State.DISCOVERY_STOP_REQUESTED;
+                });
             }
         };
+    }
+
+    private void startDiscoveryIfRequested() {
+        if (!scanRequested || state != State.NOT_DISCOVERING || mNsdManager == null) return;
+        long scanGeneration = resolveQueue.beginDiscovery();
+        NsdManager.DiscoveryListener listener = newDiscoveryListener(scanGeneration);
+        mDiscoveryListener = listener;
+        state = State.DISCOVERY_REQUESTED;
+        try {
+            mNsdManager.discoverServices("_googlecast._tcp.",
+                    NsdManager.PROTOCOL_DNS_SD, listener);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Cast DNS-SD discovery request failed", e);
+            if (mDiscoveryListener == listener) {
+                resolveQueue.endDiscovery();
+                mDiscoveryListener = null;
+                state = State.NOT_DISCOVERING;
+            }
+        }
+    }
+
+    private void resolveNext() {
+        if (mNsdManager == null) return;
+        CastDnsSdResolveQueue.Request<NsdServiceInfo> request = resolveQueue.takeNext();
+        if (request == null) return;
+
+        NsdManager.ResolveListener callback = new NsdManager.ResolveListener() {
+            @Override
+            public void onResolveFailed(NsdServiceInfo service, int errorCode) {
+                runOnMain(() -> {
+                    boolean current = resolveQueue.complete(request);
+                    if (current && errorCode == NsdManager.FAILURE_ALREADY_ACTIVE) {
+                        // Another Android NSD client may still hold the
+                        // resolver. Retry at most twice, if still current.
+                        mainHandler.postDelayed(() -> {
+                            if (resolveQueue.retryAlreadyActive(request)) resolveNext();
+                        }, 500);
+                    } else if (current) {
+                        Log.w(TAG, "Cast DNS-SD resolve failed: " + errorCode);
+                    }
+                    resolveNext();
+                });
+            }
+
+            @Override
+            public void onServiceResolved(NsdServiceInfo service) {
+                runOnMain(() -> {
+                    if (resolveQueue.complete(request)) {
+                        handleResolvedService(service);
+                    }
+                    resolveNext();
+                });
+            }
+        };
+        try {
+            mNsdManager.resolveService(request.service, callback);
+        } catch (RuntimeException e) {
+            resolveQueue.complete(request);
+            Log.w(TAG, "Cast DNS-SD resolve request failed", e);
+            resolveNext();
+        }
+    }
+
+    private void handleResolvedService(NsdServiceInfo serviceInfo) {
+        String name = serviceInfo.getServiceName();
+        InetAddress host = serviceInfo.getHost();
+        int port = serviceInfo.getPort();
+        Map<String, byte[]> attributes = serviceInfo.getAttributes();
+        if (attributes == null || host == null || port <= 0 || port > 65535) {
+            Log.w(TAG, "Ignoring Cast DNS-SD result with missing endpoint or attributes");
+            return;
+        }
+        try {
+            String id = new String(attributes.get("id"), "UTF-8");
+            String deviceVersion = new String(attributes.get("ve"), "UTF-8");
+            String friendlyName = new String(attributes.get("fn"), "UTF-8");
+            String modelName = new String(attributes.get("md"), "UTF-8");
+            String iconPath = new String(attributes.get("ic"), "UTF-8");
+            int status = Integer.parseInt(new String(attributes.get("st"), "UTF-8"));
+
+            onChromeCastDiscovered(id, name, host, port, deviceVersion,
+                    friendlyName, modelName, iconPath, status);
+        } catch (UnsupportedEncodingException | NullPointerException | NumberFormatException e) {
+            Log.w(TAG, "Ignoring malformed Cast DNS-SD TXT record", e);
+        }
     }
 
     private void onChromeCastDiscovered(
@@ -275,11 +375,13 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
     @SuppressLint("NewApi")
     @Override
     public void onDiscoveryRequestChanged(MediaRouteDiscoveryRequest request) {
-        if (android.os.Build.VERSION.SDK_INT < 16) {
-            return;
-        }
+        if (android.os.Build.VERSION.SDK_INT < 16) return;
+        runOnMain(() -> handleDiscoveryRequest(request));
+    }
 
-        if (request != null && request.isValid() && request.isActiveScan()) {
+    private void handleDiscoveryRequest(MediaRouteDiscoveryRequest request) {
+        scanRequested = request != null && request.isValid() && request.isActiveScan();
+        if (scanRequested) {
             if (request.getSelector() != null) {
                 for (String category : request.getSelector().getControlCategories()) {
                     if (CastMediaControlIntent.isCategoryForCast(category)) {
@@ -287,14 +389,17 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
                     }
                 }
             }
-            if (this.state == State.NOT_DISCOVERING) {
-                mNsdManager.discoverServices("_googlecast._tcp.", NsdManager.PROTOCOL_DNS_SD, mDiscoveryListener);
-                this.state = State.DISCOVERY_REQUESTED;
-            }
+            startDiscoveryIfRequested();
         } else {
-            if (this.state == State.DISCOVERING) {
-                mNsdManager.stopServiceDiscovery(mDiscoveryListener);
-                this.state = State.DISCOVERY_STOP_REQUESTED;
+            resolveQueue.endDiscovery();
+            if ((state == State.DISCOVERING || state == State.DISCOVERY_REQUESTED)
+                    && mNsdManager != null && mDiscoveryListener != null) {
+                state = State.DISCOVERY_STOP_REQUESTED;
+                try {
+                    mNsdManager.stopServiceDiscovery(mDiscoveryListener);
+                } catch (RuntimeException e) {
+                    Log.w(TAG, "Cast DNS-SD stop request failed", e);
+                }
             }
         }
     }
