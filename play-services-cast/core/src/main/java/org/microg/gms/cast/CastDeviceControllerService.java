@@ -54,8 +54,9 @@ public class CastDeviceControllerService extends BaseService {
     @Override
     public void handleServiceRequest(IGmsCallbacks callback, GetServiceRequest request,
                                      GmsService service) throws RemoteException {
-        if (service == GmsService.CAST_API
-                && CastDevice.getFromBundle(request.extras) == null) {
+        if (CastApiRequestRouting.useDeviceIndependentService(
+                service == GmsService.CAST_API,
+                CastDevice.getFromBundle(request.extras) != null)) {
             ConnectionInfo info = new ConnectionInfo();
             info.features = CAST_API_FEATURES;
             callback.onPostInitCompleteWithConnectionInfo(0, new CastServiceImpl(), info);
