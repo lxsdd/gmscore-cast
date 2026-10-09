@@ -45,7 +45,6 @@ import java.net.InetSocketAddress;
 import java.net.Inet4Address;
 import java.net.UnknownHostException;
 import java.io.IOException;
-import java.io.UnsupportedEncodingException;
 import java.lang.Thread;
 import java.lang.Runnable;
 import java.util.List;
@@ -334,20 +333,14 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
             Log.w(TAG, "Ignoring Cast DNS-SD result with missing endpoint or attributes");
             return;
         }
-        try {
-            String id = new String(attributes.get("id"), "UTF-8");
-            String deviceVersion = new String(attributes.get("ve"), "UTF-8");
-            String friendlyName = new String(attributes.get("fn"), "UTF-8");
-            String modelName = new String(attributes.get("md"), "UTF-8");
-            String iconPath = new String(attributes.get("ic"), "UTF-8");
-            int status = Integer.parseInt(new String(attributes.get("st"), "UTF-8"));
-            int capabilities = CastRouteCapabilities.fromDnsSdAttributes(attributes);
-
-            onChromeCastDiscovered(id, name, host, port, deviceVersion,
-                    friendlyName, modelName, iconPath, status, capabilities);
-        } catch (UnsupportedEncodingException | NullPointerException | NumberFormatException e) {
-            Log.w(TAG, "Ignoring malformed Cast DNS-SD TXT record", e);
+        CastDnsSdMetadata metadata = CastDnsSdMetadata.parse(attributes, name);
+        if (metadata == null) {
+            Log.w(TAG, "Ignoring Cast DNS-SD service without a stable device ID");
+            return;
         }
+        onChromeCastDiscovered(metadata.id, name, host, port, metadata.deviceVersion,
+                metadata.friendlyName, metadata.modelName, metadata.iconPath,
+                metadata.status, metadata.capabilities);
     }
 
     private void onChromeCastDiscovered(
