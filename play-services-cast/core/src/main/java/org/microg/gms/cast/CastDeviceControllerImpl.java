@@ -167,16 +167,15 @@ public class CastDeviceControllerImpl extends ICastDeviceController.Stub impleme
                 && currentEpoch == expectedEpoch;
     }
 
-    private void handleListenerDeath(IBinder deadBinder, long deathEpoch) {
-        synchronized (this) {
-            if (deadBinder != listenerBinder || deathEpoch != listenerRegistrationEpoch) return;
-            listenerRegistrationEpoch++;
-            this.listener = null;
-            this.listenerBinder = null;
-            this.listenerDeathRecipient = null;
-            disconnectRequested = true;
-        }
+    private synchronized void handleListenerDeath(IBinder deadBinder, long deathEpoch) {
+        if (deadBinder != listenerBinder || deathEpoch != listenerRegistrationEpoch) return;
+        listenerRegistrationEpoch++;
+        this.listener = null;
+        this.listenerBinder = null;
+        this.listenerDeathRecipient = null;
         disconnectRequested = true;
+        // Complete transport cleanup under the same monitor as registration/connect.
+        // A replacement listener cannot connect before the old session is closed.
         CastRouteLifecycleRegistry.markDisconnected(routeControllerGeneration);
         CastRouteVolumeRegistry.unregister(routeId, routeControllerGeneration, routeVolumeTransport);
         disconnectTransport();
@@ -194,7 +193,7 @@ public class CastDeviceControllerImpl extends ICastDeviceController.Stub impleme
         return listener != null;
     }
 
-    int connectBeforeInit() {
+    synchronized int connectBeforeInit() {
         disconnectRequested = false;
         reconnectAttempts = 0;
         return connectTransport();
@@ -339,18 +338,22 @@ public class CastDeviceControllerImpl extends ICastDeviceController.Stub impleme
     @Override
     public void connect() {
         // CXLESS readiness is distinct from the GMS service bind.
-        disconnectRequested = false;
+        final int status;
         synchronized (this) {
+            disconnectRequested = false;
             reconnectAttempts = 0;
             reconnectScheduled = false;
+            status = connectTransport();
         }
-        this.onConnectedWithResult(connectTransport());
+        this.onConnectedWithResult(status);
     }
 
     private void scheduleReconnect() {
         final int attempt;
+        final long expectedEpoch;
         synchronized (this) {
             if (disconnectRequested || reconnectScheduled || listener == null) return;
+            expectedEpoch = listenerRegistrationEpoch;
             if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
                 Log.w(TAG, "Giving up Cast reconnect after " + reconnectAttempts + " attempts");
                 disconnectRequested = true;
@@ -363,9 +366,13 @@ public class CastDeviceControllerImpl extends ICastDeviceController.Stub impleme
         RECONNECT_EXECUTOR.schedule(() -> {
             synchronized (CastDeviceControllerImpl.this) {
                 reconnectScheduled = false;
-                if (disconnectRequested || listener == null) return;
+                if (disconnectRequested || listener == null
+                        || listenerRegistrationEpoch != expectedEpoch) return;
             }
             int status = connectTransport();
+            synchronized (CastDeviceControllerImpl.this) {
+                if (disconnectRequested || listenerRegistrationEpoch != expectedEpoch) return;
+            }
             if (status == CommonStatusCodes.SUCCESS) {
                 onConnectedWithResult(status);
             } else {
@@ -376,10 +383,8 @@ public class CastDeviceControllerImpl extends ICastDeviceController.Stub impleme
 
     @Override
     public void setListener(ICastDeviceControllerListener listener) {
-        if (!replaceListener(listener)) {
-            disconnectRequested = true;
-            disconnectTransport();
-        }
+        // Failed linkToDeath already performs guarded teardown inside replaceListener.
+        replaceListener(listener);
     }
 
     @Override
@@ -389,8 +394,7 @@ public class CastDeviceControllerImpl extends ICastDeviceController.Stub impleme
 
     @Override
     public void setMute(boolean mute) {
-        boolean applied = CastRouteVolumeRegistry.setMuted(
-                routeId, routeControllerGeneration, mute);
+        CastRouteVolumeRegistry.setMuted(routeId, routeControllerGeneration, mute);
     }
 
     @Override
@@ -405,30 +409,23 @@ public class CastDeviceControllerImpl extends ICastDeviceController.Stub impleme
     }
 
     @Override
-    public void disconnect() {
-        final IBinder disconnectBinder;
-        final IBinder.DeathRecipient disconnectRecipient;
-        final long disconnectEpoch;
-        synchronized (this) {
-            disconnectRequested = true;
-            disconnectBinder = listenerBinder;
-            disconnectRecipient = listenerDeathRecipient;
-            disconnectEpoch = listenerRegistrationEpoch;
-        }
+    public synchronized void disconnect() {
+        disconnectRequested = true;
+        final IBinder disconnectBinder = listenerBinder;
+        final IBinder.DeathRecipient disconnectRecipient = listenerDeathRecipient;
+        final long disconnectEpoch = listenerRegistrationEpoch;
+
         CastRouteLifecycleRegistry.markDisconnected(routeControllerGeneration);
-        CastRouteVolumeRegistry.unregister(
-                routeId, routeControllerGeneration, routeVolumeTransport);
+        CastRouteVolumeRegistry.unregister(routeId, routeControllerGeneration, routeVolumeTransport);
         try {
-            // Keep the live listener until the transport has synchronously emitted its
-            // onDisconnected event. This preserves the legitimate disconnect callback.
+            // The live listener remains until the transport has emitted its
+            // synchronous onDisconnected callback.
             disconnectTransport();
         } finally {
-            synchronized (this) {
-                if (sameListenerRegistration(listenerBinder, listenerDeathRecipient,
-                        listenerRegistrationEpoch, disconnectBinder, disconnectRecipient,
-                        disconnectEpoch)) {
-                    clearListenerLocked();
-                }
+            if (sameListenerRegistration(listenerBinder, listenerDeathRecipient,
+                    listenerRegistrationEpoch, disconnectBinder, disconnectRecipient,
+                    disconnectEpoch)) {
+                clearListenerLocked();
             }
         }
     }
