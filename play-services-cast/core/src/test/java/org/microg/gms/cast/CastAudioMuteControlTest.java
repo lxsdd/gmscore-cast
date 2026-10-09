@@ -171,4 +171,48 @@ public class CastAudioMuteControlTest {
             cleanup(route, gen, transport);
         }
     }
+
+    @Test
+    public void legacyAudioMuteActionPreservesExistingSenderCompatibility() {
+        String route = "synthetic-legacy-audio";
+        long generation = CastRouteLifecycleRegistry.controllerCreated(route);
+        FakeTransport transport = new FakeTransport();
+        CastRouteVolumeRegistry.register(route, generation, transport);
+        CastRouteLifecycleRegistry.markConnected(generation);
+        CastMediaRouteController controller =
+                new CastMediaRouteController(null, route, generation, true);
+        try {
+            assertTrue(controller.handleMuteControlRequest(
+                    CastMediaRouteController.LEGACY_ACTION_SET_MUTED, true));
+            assertEquals(1, transport.muteCalls);
+            assertTrue(transport.muted);
+            assertFalse(controller.handleMuteControlRequest(
+                    CastMediaRouteController.LEGACY_ACTION_SET_MUTED, "true"));
+            assertEquals(1, transport.muteCalls);
+        } finally {
+            cleanup(route, generation, transport);
+        }
+    }
+
+    @Test
+    public void legacyToggleRequiresKnownReceiverStateAndRejectsExtraValue() {
+        String route = "synthetic-legacy-toggle";
+        long generation = CastRouteLifecycleRegistry.controllerCreated(route);
+        FakeTransport transport = new FakeTransport();
+        CastRouteVolumeRegistry.register(route, generation, transport);
+        CastRouteLifecycleRegistry.markConnected(generation);
+        CastMediaRouteController controller =
+                new CastMediaRouteController(null, route, generation, true);
+        try {
+            assertFalse(controller.handleMuteControlRequest(
+                    CastMediaRouteController.LEGACY_ACTION_TOGGLE_MUTED, null));
+            CastRouteVolumeRegistry.updateFromReceiver(route, generation, 0.5d, false);
+            assertTrue(controller.handleMuteControlRequest(
+                    CastMediaRouteController.LEGACY_ACTION_TOGGLE_MUTED, null));
+            assertFalse(controller.handleMuteControlRequest(
+                    CastMediaRouteController.LEGACY_ACTION_TOGGLE_MUTED, true));
+        } finally {
+            cleanup(route, generation, transport);
+        }
+    }
 }
