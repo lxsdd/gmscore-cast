@@ -73,6 +73,15 @@ public class CastDevice extends AutoSafeParcelable {
      */
     public static final int CAPABILITY_AUDIO_IN = 8;
 
+    /** Static multizone group announced by Cast DNS-SD. */
+    public static final int CAPABILITY_MULTIZONE_GROUP = 32;
+
+    /** Dynamic multizone group announced by Cast DNS-SD. */
+    public static final int CAPABILITY_DYNAMIC_GROUP = 64;
+
+    /** Multizone source (distinct from an actual group). */
+    public static final int CAPABILITY_MULTIZONE_SOURCE = 128;
+
     @SafeParceled(1)
     private int versionCode = 3;
 
@@ -144,6 +153,10 @@ public class CastDevice extends AutoSafeParcelable {
 
     public int getServicePort() {
         return servicePort;
+    }
+
+    public int getCapabilities() {
+        return capabilities;
     }
 
     public boolean hasCapabilities(int[] capabilities) {
