@@ -23,6 +23,8 @@ import android.util.ArrayMap;
 import android.util.Log;
 
 import com.google.android.gms.cast.CastDevice;
+import com.google.android.gms.common.Feature;
+import com.google.android.gms.common.internal.ConnectionInfo;
 import com.google.android.gms.cast.internal.ICastDeviceControllerListener;
 import com.google.android.gms.common.internal.GetServiceRequest;
 import com.google.android.gms.common.internal.BinderWrapper;
@@ -39,12 +41,30 @@ import su.litvak.chromecast.api.v2.ChromeCastsListener;
 public class CastDeviceControllerService extends BaseService {
     private static final String TAG = CastDeviceControllerService.class.getSimpleName();
 
+    private static final Feature[] CAST_API_FEATURES = {
+            new Feature("module_flag_control", 1, true),
+            new Feature("analytics_proto_enum_translation", 1, true),
+            new Feature("integer_to_integer_map", 1, true)
+    };
+
     public CastDeviceControllerService() {
-        super("GmsCastDeviceControllerSvc", GmsService.CAST);
+        super("GmsCastDeviceControllerSvc", GmsService.CAST, GmsService.CAST_API);
     }
 
     @Override
-    public void handleServiceRequest(IGmsCallbacks callback, GetServiceRequest request, GmsService service) throws RemoteException {
-        callback.onPostInitComplete(0, new CastDeviceControllerImpl(this, request.packageName, request.extras), null);
+    public void handleServiceRequest(IGmsCallbacks callback, GetServiceRequest request,
+                                     GmsService service) throws RemoteException {
+        if (service == GmsService.CAST_API
+                && CastDevice.getFromBundle(request.extras) == null) {
+            ConnectionInfo info = new ConnectionInfo();
+            info.features = CAST_API_FEATURES;
+            callback.onPostInitCompleteWithConnectionInfo(0, new CastServiceImpl(), info);
+            return;
+        }
+
+        // Keep legacy device-bound CAST behavior unchanged until its separate
+        // transport/connection-readiness PR is qualified.
+        callback.onPostInitComplete(0,
+                new CastDeviceControllerImpl(this, request.packageName, request.extras), null);
     }
 }
