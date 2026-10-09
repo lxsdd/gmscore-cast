@@ -35,6 +35,19 @@ public class CastMediaRouteController extends MediaRouteProvider.RouteController
     static final String ACTION_SET_MUTED = "org.microg.gms.cast.action.SET_MUTED";
     static final String ACTION_TOGGLE_MUTED = "org.microg.gms.cast.action.TOGGLE_MUTED";
     static final String EXTRA_MUTED = "org.microg.gms.cast.extra.MUTED";
+    // Transitional compatibility for existing downstream sender builds. This
+    // alias is isolated here; the generic Cast controller logic stays shared.
+    static final String LEGACY_ACTION_SET_MUTED = "app.morphe.gms.cast.action.SET_MUTED";
+    static final String LEGACY_ACTION_TOGGLE_MUTED = "app.morphe.gms.cast.action.TOGGLE_MUTED";
+    static final String LEGACY_EXTRA_MUTED = "app.morphe.gms.cast.extra.MUTED";
+
+    private static boolean isSetMuted(String action) {
+        return ACTION_SET_MUTED.equals(action) || LEGACY_ACTION_SET_MUTED.equals(action);
+    }
+
+    private static boolean isToggleMuted(String action) {
+        return ACTION_TOGGLE_MUTED.equals(action) || LEGACY_ACTION_TOGGLE_MUTED.equals(action);
+    }
 
     private static final ExecutorService VOLUME_COMMANDS =
             Executors.newSingleThreadExecutor(r -> {
@@ -61,16 +74,14 @@ public class CastMediaRouteController extends MediaRouteProvider.RouteController
     public boolean onControlRequest(Intent intent, MediaRouter.ControlRequestCallback callback) {
         if (intent == null || released || !audioOnly) return false;
         final String action = intent.getAction();
-        if (!ACTION_SET_MUTED.equals(action) && !ACTION_TOGGLE_MUTED.equals(action)) {
-            return false;
-        }
+        if (!isSetMuted(action) && !isToggleMuted(action)) return false;
         Object requestedMuted;
         try {
             Bundle extras = intent.getExtras();
-            if (ACTION_TOGGLE_MUTED.equals(action) && extras != null && !extras.isEmpty()) {
-                return false;
-            }
-            requestedMuted = extras == null ? null : extras.get(EXTRA_MUTED);
+            if (isToggleMuted(action) && extras != null && !extras.isEmpty()) return false;
+            String mutedKey = LEGACY_ACTION_SET_MUTED.equals(action)
+                    ? LEGACY_EXTRA_MUTED : EXTRA_MUTED;
+            requestedMuted = extras == null ? null : extras.get(mutedKey);
         } catch (RuntimeException invalidExtras) {
             return false;
         }
@@ -81,11 +92,11 @@ public class CastMediaRouteController extends MediaRouteProvider.RouteController
 
     boolean handleMuteControlRequest(String action, Object mutedValue) {
         if (released || !audioOnly) return false;
-        if (ACTION_TOGGLE_MUTED.equals(action)) {
+        if (isToggleMuted(action)) {
             return mutedValue == null
                     && CastRouteVolumeRegistry.toggleMuted(routeId, controllerGeneration);
         }
-        return ACTION_SET_MUTED.equals(action) && mutedValue instanceof Boolean
+        return isSetMuted(action) && mutedValue instanceof Boolean
                 && CastRouteVolumeRegistry.setMuted(
                         routeId, controllerGeneration, (Boolean) mutedValue);
     }
