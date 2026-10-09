@@ -142,4 +142,70 @@ public class CastRouteDiscoveryStateTest {
         assertTrue(state.replaceCategories(null));
         assertTrue(state.snapshot().categories.isEmpty());
     }
+
+    @Test
+    public void selectedRouteSurvivesDnsSdLossAndDisappearsAfterDeselect() {
+        CastRouteDiscoveryState<String> state = new CastRouteDiscoveryState<>();
+        Object selectedController = new Object();
+        state.putDevice("receiver", "service", "endpoint", true);
+        assertTrue(state.selectRoute("receiver", selectedController));
+        state.forgetService("service");
+        assertEquals("endpoint", state.getDevice("receiver"));
+        assertTrue(state.isSelected("receiver"));
+        assertTrue(state.releaseRoute("receiver", selectedController));
+        assertNull(state.getDevice("receiver"));
+    }
+
+    @Test
+    public void creatingControllerAloneDoesNotRetainUnselectedLostRoute() {
+        CastRouteDiscoveryState<String> state = new CastRouteDiscoveryState<>();
+        state.putDevice("receiver", "service", "endpoint", true);
+        state.forgetService("service");
+        assertNull(state.getDevice("receiver"));
+        assertFalse(state.selectRoute("receiver", new Object()));
+    }
+
+    @Test
+    public void staleControllerCannotReleaseReplacementControllerSelection() {
+        CastRouteDiscoveryState<String> state = new CastRouteDiscoveryState<>();
+        Object first = new Object(), second = new Object();
+        state.putDevice("receiver", "service", "endpoint", true);
+        assertTrue(state.selectRoute("receiver", first));
+        assertFalse(state.selectRoute("receiver", first));
+        assertTrue(state.selectRoute("receiver", second));
+        state.forgetService("service");
+        assertTrue(state.releaseRoute("receiver", first));
+        assertEquals("endpoint", state.getDevice("receiver"));
+        assertFalse(state.releaseRoute("receiver", first));
+        assertTrue(state.releaseRoute("receiver", second));
+        assertNull(state.getDevice("receiver"));
+    }
+
+    @Test
+    public void rediscoveryWhileSelectedPreservesRouteAfterControllerReleases() {
+        CastRouteDiscoveryState<String> state = new CastRouteDiscoveryState<>();
+        Object controller = new Object();
+        state.putDevice("receiver", "old", "old-endpoint", true);
+        state.selectRoute("receiver", controller);
+        state.forgetService("old");
+        state.putDevice("receiver", "new", "new-endpoint", true);
+        assertEquals("new-endpoint", state.getDevice("receiver"));
+        assertTrue(state.releaseRoute("receiver", controller));
+        assertEquals("new-endpoint", state.getDevice("receiver"));
+        state.forgetService("new");
+        assertNull(state.getDevice("receiver"));
+    }
+
+    @Test
+    public void reassignedServiceDoesNotEvictCurrentlySelectedFormerRoute() {
+        CastRouteDiscoveryState<String> state = new CastRouteDiscoveryState<>();
+        Object controller = new Object();
+        state.putDevice("old-id", "service", "first", true);
+        state.selectRoute("old-id", controller);
+        state.putDevice("new-id", "service", "second", true);
+        assertEquals("first", state.getDevice("old-id"));
+        assertEquals("second", state.getDevice("new-id"));
+        state.releaseRoute("old-id", controller);
+        assertNull(state.getDevice("old-id"));
+    }
 }

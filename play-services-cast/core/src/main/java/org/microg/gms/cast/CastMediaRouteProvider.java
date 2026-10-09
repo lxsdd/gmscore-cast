@@ -410,6 +410,14 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
         return new CastMediaRouteController(this, routeId, castDevice.getAddress());
     }
 
+    void onRouteControllerSelected(String routeId, Object token) {
+        if (routeState.selectRoute(routeId, token)) publishRoutesInMainThread();
+    }
+
+    void onRouteControllerDeselected(String routeId, Object token) {
+        if (routeState.releaseRoute(routeId, token)) publishRoutesInMainThread();
+    }
+
     private void publishRoutesInMainThread() {
         Handler mainHandler = new Handler(this.getContext().getMainLooper());
         mainHandler.post(new Runnable() {

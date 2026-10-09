@@ -5,6 +5,9 @@ package org.microg.gms.cast;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Set;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +30,9 @@ final class CastRouteDiscoveryState<T> {
     private final Map<String, T> devices = new HashMap<>();
     private final Map<String, String> serviceCastIds = new HashMap<>();
     private final List<String> categories = new ArrayList<>();
+    // Token identity ties route retention to the actual selecting controller,
+    // rather than the mere existence of a RouteController instance.
+    private final Map<String, Set<Object>> selectedOwners = new HashMap<>();
 
     static final class Snapshot<T> {
         final List<T> devices;
@@ -60,7 +66,7 @@ final class CastRouteDiscoveryState<T> {
         String previousId = serviceCastIds.put(serviceName, id);
         if (previousId != null && !Objects.equals(previousId, id)
                 && !serviceCastIds.containsValue(previousId)) {
-            devices.remove(previousId);
+            removeIfUnused(previousId);
         }
         return changed || !Objects.equals(previousId, id);
     }
@@ -68,8 +74,42 @@ final class CastRouteDiscoveryState<T> {
     synchronized void forgetService(String serviceName) {
         String id = serviceCastIds.remove(serviceName);
         if (id != null && !serviceCastIds.containsValue(id)) {
-            devices.remove(id);
+            removeIfUnused(id);
         }
+    }
+
+    /** A selected route survives temporary DNS-SD loss until its controller releases it. */
+    synchronized boolean selectRoute(String id, Object controllerToken) {
+        if (id == null || controllerToken == null || !devices.containsKey(id)) return false;
+        Set<Object> tokens = selectedOwners.get(id);
+        if (tokens == null) {
+            tokens = Collections.newSetFromMap(new IdentityHashMap<Object, Boolean>());
+            selectedOwners.put(id, tokens);
+        }
+        return tokens.add(controllerToken);
+    }
+
+    /** Release by exact controller identity; no stale controller can release another one. */
+    synchronized boolean releaseRoute(String id, Object controllerToken) {
+        if (id == null || controllerToken == null) return false;
+        Set<Object> tokens = selectedOwners.get(id);
+        if (tokens == null || !tokens.remove(controllerToken)) return false;
+        if (tokens.isEmpty()) {
+            selectedOwners.remove(id);
+            if (!serviceCastIds.containsValue(id)) {
+                devices.remove(id);
+            }
+        }
+        return true;
+    }
+
+    synchronized boolean isSelected(String id) {
+        Set<Object> tokens = selectedOwners.get(id);
+        return tokens != null && !tokens.isEmpty();
+    }
+
+    private void removeIfUnused(String id) {
+        if (!isSelected(id)) devices.remove(id);
     }
 
     synchronized void addCategory(String category) {
