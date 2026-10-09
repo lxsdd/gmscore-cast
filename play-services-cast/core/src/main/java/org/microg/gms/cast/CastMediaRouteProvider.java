@@ -461,6 +461,8 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
                 muteFilter.addCategory(MediaControlIntent.CATEGORY_REMOTE_PLAYBACK);
                 muteFilter.addAction(CastMediaRouteController.ACTION_SET_MUTED);
                 muteFilter.addAction(CastMediaRouteController.ACTION_TOGGLE_MUTED);
+                muteFilter.addAction(CastMediaRouteController.LEGACY_ACTION_SET_MUTED);
+                muteFilter.addAction(CastMediaRouteController.LEGACY_ACTION_TOGGLE_MUTED);
                 controlFilters.add(muteFilter);
             }
             // Include any app-specific control filters that have been requested.
