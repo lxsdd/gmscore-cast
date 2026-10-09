@@ -18,6 +18,8 @@ final class CastRouteCapabilities {
     // AndroidX MediaRouter group route type; kept as an integer because some
     // versions of the compatibility library do not expose a named constant.
     static final int MEDIA_ROUTER_DEVICE_TYPE_GROUP = 1000;
+    // MediaRouter exposes UNKNOWN=0 internally but marks the constant restricted.
+    private static final int MEDIA_ROUTER_DEVICE_TYPE_UNKNOWN = 0;
 
     private CastRouteCapabilities() {
     }
@@ -54,7 +56,7 @@ final class CastRouteCapabilities {
         if (has(bits, CastDevice.CAPABILITY_VIDEO_OUT)) {
             return MediaRouter.RouteInfo.DEVICE_TYPE_TV;
         }
-        return MediaRouter.RouteInfo.DEVICE_TYPE_UNKNOWN;
+        return MEDIA_ROUTER_DEVICE_TYPE_UNKNOWN;
     }
 
     /** Preserve the legacy broad filter only when the receiver gives no output caps. */
