@@ -1,0 +1,107 @@
+# Public, unprivileged, unsigned software packaging gate.
+# Initial addition triggers exactly one candidate build on protected main.
+# Later hardware candidate rebuilds require explicit workflow_dispatch.
+name: Cast Hardware Candidate (UNSIGNED)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cast-hardware-candidate.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cast-single-hardware-candidate
+  cancel-in-progress: false
+
+jobs:
+  unsigned-hardware-candidate:
+    name: Full app package and provenance (unsigned)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GRADLE_MICROG_VERSION_WITHOUT_GIT: '1'
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Java 17
+        uses: actions/setup-java@v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Gradle cache
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Validate source and candidate provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check HEAD^ HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          echo "Source SHA: $GITHUB_SHA"
+          echo "Expected applicationId: app.revanced.android.gms"
+
+      - name: Assemble exactly one default release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew :play-services-core:assembleDefaultRelease --no-daemon
+
+      - name: Inspect APK and record immutable SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p candidate
+          mapfile -t packages < <(find play-services-core/build/outputs/apk/default/release \
+            -maxdepth 1 -type f -name '*.apk' | sort)
+          if [ "${#packages[@]}" -ne 1 ]; then
+            echo "::error::Exactly one release APK is required; found ${#packages[@]}"
+            exit 1
+          fi
+          apk="${packages[0]}"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > candidate/aapt-badging.txt
+          grep -q "name='app.revanced.android.gms'" candidate/aapt-badging.txt
+          cp "$apk" candidate/gmscore-cast-UNSIGNED.apk
+          (cd candidate && sha256sum gmscore-cast-UNSIGNED.apk > SHA256SUMS.txt)
+          if "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+                --verbose candidate/gmscore-cast-UNSIGNED.apk >/dev/null 2>&1; then
+            echo "::error::Unexpected signing detected. A public unsigned candidate must never contain a private signer."
+            exit 1
+          fi
+          {
+            echo "SOURCE_SHA=$GITHUB_SHA"
+            echo "APPLICATION_ID=app.revanced.android.gms"
+            echo "SIGNATURE_STATUS=UNSIGNED_NOT_INSTALLABLE"
+            echo "HARDWARE_STATUS=NOT_TESTED"
+            echo "CI_SCOPE=FULL_APPLICATION_PACKAGING_ONLY"
+            echo "APK_SHA256=$(cut -d' ' -f1 candidate/SHA256SUMS.txt)"
+          } > candidate/PROVENANCE.txt
+          cat candidate/PROVENANCE.txt
+          echo "### Full application package (software-only)" >> "$GITHUB_STEP_SUMMARY"
+          echo "SHA: \`$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "UNSIGNED — DO NOT INSTALL; matching existing signer is required." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned candidate for secure offline signing
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmscore-cast-UNSIGNED-${{ github.sha }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 7
