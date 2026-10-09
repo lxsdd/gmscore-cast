@@ -463,6 +463,13 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
         for (CastDevice castDevice : snapshot.devices) {
             ArrayList<IntentFilter> controlFilters = new ArrayList<IntentFilter>(BASE_CONTROL_FILTERS);
             controlFilters.add(createRemotePlaybackFilter(castDevice.getCapabilities()));
+            if (CastRouteCapabilities.isAudioOnly(castDevice.getCapabilities())) {
+                IntentFilter muteFilter = new IntentFilter();
+                muteFilter.addCategory(MediaControlIntent.CATEGORY_REMOTE_PLAYBACK);
+                muteFilter.addAction(CastMediaRouteController.ACTION_SET_MUTED);
+                muteFilter.addAction(CastMediaRouteController.ACTION_TOGGLE_MUTED);
+                controlFilters.add(muteFilter);
+            }
             // Include any app-specific control filters that have been requested.
             // TODO: Do we need to check with the device?
             for (String category : snapshot.categories) {
