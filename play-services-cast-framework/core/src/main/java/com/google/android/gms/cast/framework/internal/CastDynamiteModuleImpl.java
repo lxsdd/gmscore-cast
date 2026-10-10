@@ -44,6 +44,10 @@ public class CastDynamiteModuleImpl extends ICastDynamiteModule.Stub {
 
     @Override
     public ICastContext newCastContextImpl(IObjectWrapper context, CastOptions options, IMediaRouter router, Map sessionProviders) throws RemoteException {
+        Context clientContext = (Context) com.google.android.gms.dynamic.ObjectWrapper.unwrap(context);
+        Log.i(TAG, "castContextFactoryEntry clientPackage="
+                + (clientContext == null ? "<none>" : clientContext.getPackageName())
+                + " routerPresent=" + (router != null));
         return new CastContextImpl(context, options, router, sessionProviders);
     }
 
@@ -73,5 +77,18 @@ public class CastDynamiteModuleImpl extends ICastDynamiteModule.Stub {
     public IFetchBitmapTask newFetchBitmapTaskImpl(IObjectWrapper asyncTask, IFetchBitmapTaskProgressPublisher progressPublisher, int i1, int i2, boolean b1, long l1, int i3, int i4, int i5) throws RemoteException {
         Log.d(TAG, "unimplemented Method: newFetchBitmapTaskImpl");
         return null;
+    }
+
+    @Override
+    public IFetchBitmapTask newFetchBitmapTaskImplWithContext(IObjectWrapper context, IObjectWrapper asyncTask,
+            IFetchBitmapTaskProgressPublisher progressPublisher, int i1, int i2, boolean b1,
+            long l1, int i3, int i4, int i5) throws RemoteException {
+        Log.d(TAG, "unimplemented Method: newFetchBitmapTaskImplWithContext");
+        return null;
+    }
+
+    @Override
+    public int getSupportedVersion() {
+        return org.microg.gms.common.Constants.GMS_VERSION_CODE;
     }
 }
