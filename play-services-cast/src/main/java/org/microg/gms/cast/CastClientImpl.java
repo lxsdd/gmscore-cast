@@ -17,14 +17,62 @@
 package org.microg.gms.cast;
 
 import android.content.Context;
+import android.os.IBinder;
+import android.os.RemoteException;
 
 import com.google.android.gms.cast.Cast;
+import com.google.android.gms.cast.internal.ICastDeviceController;
+import com.google.android.gms.common.api.GoogleApiClient;
 
-import org.microg.gms.common.DummyApiClient;
+import org.microg.gms.common.GmsClient;
+import org.microg.gms.common.GmsService;
 import com.google.android.gms.common.api.internal.ConnectionCallbacks;
+import org.microg.gms.common.api.GoogleApiClientImpl;
 import com.google.android.gms.common.api.internal.OnConnectionFailedListener;
 
-public class CastClientImpl extends DummyApiClient {
+import java.io.IOException;
+
+public class CastClientImpl extends GmsClient<ICastDeviceController> {
     public CastClientImpl(Context context, Cast.CastOptions options, ConnectionCallbacks callbacks, OnConnectionFailedListener connectionFailedListener) {
+        super(context, callbacks, connectionFailedListener, GmsService.CAST.ACTION);
+        serviceId = GmsService.CAST.SERVICE_ID;
+        if (options != null && options.getCastDevice() != null) {
+            options.getCastDevice().putInBundle(extras);
+        }
+    }
+
+    @Override
+    protected ICastDeviceController interfaceFromBinder(IBinder binder) {
+        return ICastDeviceController.Stub.asInterface(binder);
+    }
+
+    static CastClientImpl get(GoogleApiClient client) {
+        if (!(client instanceof GoogleApiClientImpl)) return null;
+        Object connection = ((GoogleApiClientImpl) client).getApiConnection(Cast.API);
+        return connection instanceof CastClientImpl ? (CastClientImpl) connection : null;
+    }
+
+    void setMute(boolean mute) throws IOException {
+        try {
+            getServiceInterface().setMute(mute);
+        } catch (RemoteException | IllegalStateException failure) {
+            throw new IOException("Cast controller is not available", failure);
+        }
+    }
+
+    boolean isMute() {
+        try {
+            return getServiceInterface().isMute();
+        } catch (RemoteException | IllegalStateException failure) {
+            return false;
+        }
+    }
+
+    double getVolume() {
+        try {
+            return getServiceInterface().getVolume();
+        } catch (RemoteException | IllegalStateException failure) {
+            return 0d;
+        }
     }
 }

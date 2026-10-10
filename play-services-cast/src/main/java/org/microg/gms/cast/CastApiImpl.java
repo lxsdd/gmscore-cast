@@ -49,12 +49,14 @@ public class CastApiImpl implements Cast.CastApi {
 
     @Override
     public double getVolume(GoogleApiClient client) {
-        return 0;
+        CastClientImpl castClient = CastClientImpl.get(client);
+        return castClient == null ? 0d : castClient.getVolume();
     }
 
     @Override
     public boolean isMute(GoogleApiClient client) {
-        return false;
+        CastClientImpl castClient = CastClientImpl.get(client);
+        return castClient != null && castClient.isMute();
     }
 
     @Override
@@ -114,7 +116,9 @@ public class CastApiImpl implements Cast.CastApi {
 
     @Override
     public void setMute(GoogleApiClient client, boolean mute) throws IOException {
-
+        CastClientImpl castClient = CastClientImpl.get(client);
+        if (castClient == null) throw new IOException("GoogleApiClient has no Cast connection");
+        castClient.setMute(mute);
     }
 
     @Override
