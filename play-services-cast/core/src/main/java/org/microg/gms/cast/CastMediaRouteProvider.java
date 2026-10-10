@@ -376,16 +376,19 @@ public class CastMediaRouteProvider extends MediaRouteProvider {
     }
 
     private void handleDiscoveryRequest(MediaRouteDiscoveryRequest request) {
-        scanRequested = request != null && request.isValid() && request.isActiveScan();
+        // The selector stays authoritative for route compatibility even when
+        // the chooser stops actively scanning. Active scan only controls DNS-SD.
+        boolean validRequest = request != null && request.isValid();
+        scanRequested = validRequest && request.isActiveScan();
         List<String> categories = new ArrayList<>();
-        if (scanRequested && request.getSelector() != null) {
+        if (validRequest && request.getSelector() != null) {
             for (String category : request.getSelector().getControlCategories()) {
                 if (CastMediaControlIntent.isCategoryForCast(category)) {
                     categories.add(category);
                 }
             }
         }
-        if (routeState.replaceCategories(categories)) {
+        if (routeState.replaceRequestCategories(validRequest, categories)) {
             publishRoutesInMainThread();
         }
         if (scanRequested) {
