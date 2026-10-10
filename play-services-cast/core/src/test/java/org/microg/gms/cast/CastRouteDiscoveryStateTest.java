@@ -144,6 +144,23 @@ public class CastRouteDiscoveryStateTest {
     }
 
     @Test
+    public void passiveDiscoveryRequestPreservesSelectorCategories() {
+        CastRouteDiscoveryState<String> state = new CastRouteDiscoveryState<>();
+        java.util.List<String> castCategories = java.util.Arrays.asList(
+                "urn:x-cast:app", "urn:x-cast:audio");
+
+        assertTrue(state.replaceRequestCategories(true, castCategories));
+        // The same valid request remains authoritative when activeScan is false.
+        assertFalse(state.replaceRequestCategories(true, castCategories));
+        assertEquals(castCategories, state.snapshot().categories);
+        assertTrue(state.replaceRequestCategories(false, castCategories));
+        assertTrue(state.snapshot().categories.isEmpty());
+        // A new valid passive request is allowed to republish its selector.
+        assertTrue(state.replaceRequestCategories(true, castCategories));
+        assertEquals(castCategories, state.snapshot().categories);
+    }
+
+    @Test
     public void selectedRouteSurvivesDnsSdLossAndDisappearsAfterDeselect() {
         CastRouteDiscoveryState<String> state = new CastRouteDiscoveryState<>();
         Object selectedController = new Object();
