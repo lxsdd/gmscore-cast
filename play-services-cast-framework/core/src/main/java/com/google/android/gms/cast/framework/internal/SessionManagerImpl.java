@@ -33,9 +33,6 @@ import com.google.android.gms.dynamic.ObjectWrapper;
 import java.util.Set;
 import java.util.HashSet;
 
-import java.util.Map;
-import java.util.HashMap;
-
 public class SessionManagerImpl extends ISessionManager.Stub {
     private static final String TAG = SessionManagerImpl.class.getSimpleName();
 
@@ -43,8 +40,6 @@ public class SessionManagerImpl extends ISessionManager.Stub {
 
     private Set<ISessionManagerListener> sessionManagerListeners = new HashSet<ISessionManagerListener>();
     private Set<ICastStateListener> castStateListeners = new HashSet<ICastStateListener>();
-
-    private Map<String, SessionImpl> routeSessions = new HashMap<String, SessionImpl>();
 
     private SessionImpl currentSession;
 
@@ -64,12 +59,20 @@ public class SessionManagerImpl extends ISessionManager.Stub {
 
     @Override
     public void endCurrentSession(boolean b, boolean stopCasting) throws RemoteException {
-        Log.d(TAG, "unimplemented Method: endCurrentSession");
+        Log.i(TAG, "endCurrentSession stopCasting=" + stopCasting
+                + " currentSessionPresent=" + (this.currentSession != null));
+        if (this.currentSession == null) {
+            return;
+        }
+
+        SessionImpl session = this.currentSession;
+        session.end(stopCasting, this);
     }
 
     @Override
     public void addSessionManagerListener(ISessionManagerListener listener) {
-        Log.d(TAG, "unimplemented Method: addSessionManagerListener");
+        Log.i(TAG, "addSessionManagerListener callbackClass=" + getSessionListenerClass(listener)
+                + " supportedVersion=" + getSessionListenerVersion(listener));
         this.sessionManagerListeners.add(listener);
     }
 
@@ -103,13 +106,45 @@ public class SessionManagerImpl extends ISessionManager.Stub {
 
     @Override
     public void startSession(Bundle params) {
-        Log.d(TAG, "unimplemented Method: startSession");
+        if (params == null) return;
         String routeId = params.getString("CAST_INTENT_TO_CAST_ROUTE_ID_KEY");
-        String sessionId = params.getString("CAST_INTENT_TO_CAST_SESSION_ID_KEY");
+        if (routeId == null) return;
+        try {
+            castContext.getRouter().selectRouteById(routeId);
+        } catch (RemoteException e) {
+            Log.w(TAG, "Failed to select requested route: " + e.getMessage());
+        }
     }
 
-    public void onRouteSelected(String routeId, Bundle extras) {
-        Log.d(TAG, "unimplemented Method: onRouteSelected: " + routeId);
+    public void onRouteConnectionLost(String routeId, int reason) {
+        SessionImpl session;
+        synchronized (this) {
+            session = currentSession;
+        }
+        if (session == null || routeId == null || !routeId.equals(session.getRouteId())) return;
+        session.notifySessionSuspended(reason);
+    }
+
+    public void onRouteChanged(String routeId, Bundle extras) {
+        SessionImpl session;
+        synchronized (this) {
+            session = currentSession;
+        }
+        if (session == null || routeId == null || !routeId.equals(session.getRouteId())) return;
+        session.onRouteInfoUpdated(extras);
+    }
+
+    public void onRouteUnselected(String routeId, boolean stopCasting) {
+        SessionImpl session;
+        synchronized (this) {
+            session = currentSession;
+        }
+        if (session == null || routeId == null || !routeId.equals(session.getRouteId())) return;
+        try {
+            session.end(stopCasting);
+        } catch (RemoteException e) {
+            Log.w(TAG, "Failed to end unselected route session: " + e.getMessage());
+        }
     }
 
     private void setCastState(int castState) {
@@ -118,51 +153,132 @@ public class SessionManagerImpl extends ISessionManager.Stub {
     }
 
     public void onCastStateChanged() {
-        for (ICastStateListener listener : this.castStateListeners) {
+        for (ICastStateListener listener : new HashSet<>(this.castStateListeners)) {
             try {
                 listener.onCastStateChanged(this.castState);
-            } catch (RemoteException e) {
+            } catch (RemoteException | RuntimeException e) {
                 Log.d(TAG, "Remote exception calling onCastStateChanged: " + e.getMessage());
             }
         }
     }
 
-    public void onSessionStarting(SessionImpl session) {
+    public boolean onSessionStarting(SessionImpl session) {
+        boolean accepted;
+        synchronized (this) {
+            boolean currentAvailable = this.currentSession == null || this.currentSession == session;
+            if (!currentAvailable) {
+                accepted = false;
+            } else if (session.getLifecycleStateForTest() == SessionImpl.LifecycleState.NEW) {
+                // Keep the established direct-manager test/internal contract while production
+                // SessionImpl.start() pre-marks STARTING before its preparation callbacks.
+                accepted = session.markStarting();
+            } else {
+                accepted = session.getLifecycleStateForTest() == SessionImpl.LifecycleState.STARTING;
+            }
+            if (accepted) this.currentSession = session;
+        }
+        Log.i(TAG, "onSessionStarting sessionGeneration=" + session.getSessionGeneration()
+                + " accepted=" + accepted + " sessionStillCurrent="
+                + (this.currentSession == session)
+                + " listenerCount=" + this.sessionManagerListeners.size());
+        if (!accepted) return false;
         this.setCastState(CastState.CONNECTING);
+        int callbackIndex = 0;
         for (ISessionManagerListener listener : this.sessionManagerListeners) {
             try {
                 listener.onSessionStarting(session.getSessionProxy().getWrappedSession());
+                Log.i(TAG, "onSessionStartingCallback index=" + callbackIndex
+                        + " callbackClass=" + getSessionListenerClass(listener) + " delivered=true");
             } catch (RemoteException e) {
+                Log.i(TAG, "onSessionStartingCallback index=" + callbackIndex
+                        + " callbackClass=" + getSessionListenerClass(listener) + " delivered=false");
                 Log.d(TAG, "Remote exception calling onSessionStarting: " + e.getMessage());
             }
+            callbackIndex++;
         }
+        return true;
     }
 
-    public void onSessionStartFailed(SessionImpl session, int error) {
-        this.currentSession = null;
+    public boolean onSessionStartFailed(SessionImpl session, int error) {
+        boolean accepted;
+        synchronized (this) {
+            accepted = this.currentSession == session && session.markStartFailed();
+            if (accepted) this.currentSession = null;
+        }
+        Log.i(TAG, "onSessionStartFailed sessionGeneration=" + session.getSessionGeneration()
+                + " accepted=" + accepted + " error=" + error);
+        if (!accepted) return false;
         this.setCastState(CastState.NOT_CONNECTED);
-        for (ISessionManagerListener listener : this.sessionManagerListeners) {
+        int deliveredCount = 0;
+        for (ISessionManagerListener listener : new HashSet<>(this.sessionManagerListeners)) {
             try {
                 listener.onSessionStartFailed(session.getSessionProxy().getWrappedSession(), error);
-            } catch (RemoteException e) {
+                deliveredCount++;
+            } catch (RemoteException | RuntimeException e) {
                 Log.d(TAG, "Remote exception calling onSessionStartFailed: " + e.getMessage());
             }
         }
+        Log.i(TAG, "FAILURE_LIFECYCLE: stage=LISTENER_PROPAGATION statusCode=" + error
+                + " accepted=true listenerCount=" + this.sessionManagerListeners.size()
+                + " deliveredCount=" + deliveredCount);
+        return true;
     }
 
-    public void onSessionStarted(SessionImpl session, String sessionId) {
-        this.currentSession = session;
+    public boolean onSessionStarted(SessionImpl session, String sessionId) {
+        boolean accepted;
+        synchronized (this) {
+            accepted = this.currentSession == session && session.markStarted(sessionId);
+        }
+        Log.i(TAG, "onSessionStarted sessionGeneration=" + session.getSessionGeneration()
+                + " accepted=" + accepted + " sessionStillCurrent="
+                + (this.currentSession == session)
+                + " listenerCount=" + this.sessionManagerListeners.size()
+                + " sessionIdPresent=" + (sessionId != null));
+        if (!accepted) return false;
         this.setCastState(CastState.CONNECTED);
+        int callbackIndex = 0;
         for (ISessionManagerListener listener : this.sessionManagerListeners) {
             try {
                 listener.onSessionStarted(session.getSessionProxy().getWrappedSession(), sessionId);
+                Log.i(TAG, "onSessionStartedCallback index=" + callbackIndex
+                        + " callbackClass=" + getSessionListenerClass(listener) + " delivered=true");
             } catch (RemoteException e) {
+                Log.i(TAG, "onSessionStartedCallback index=" + callbackIndex
+                        + " callbackClass=" + getSessionListenerClass(listener) + " delivered=false");
                 Log.d(TAG, "Remote exception calling onSessionStarted: " + e.getMessage());
             }
+            callbackIndex++;
+        }
+        return true;
+    }
+
+    private String getSessionListenerClass(ISessionManagerListener listener) {
+        if (listener == null) {
+            return "<null>";
+        }
+        try {
+            Object wrapped = ObjectWrapper.unwrap(listener.getWrappedThis());
+            return wrapped == null ? "<null>" : wrapped.getClass().getName();
+        } catch (RemoteException | RuntimeException e) {
+            return "<unavailable>";
+        }
+    }
+
+    private int getSessionListenerVersion(ISessionManagerListener listener) {
+        if (listener == null) {
+            return -1;
+        }
+        try {
+            return listener.getSupportedVersion();
+        } catch (RemoteException | RuntimeException e) {
+            return -1;
         }
     }
 
     public void onSessionResumed(SessionImpl session, boolean wasSuspended) {
+        synchronized (this) {
+            if (this.currentSession != session) return;
+        }
         this.setCastState(CastState.CONNECTED);
         for (ISessionManagerListener listener : this.sessionManagerListeners) {
             try {
@@ -173,29 +289,78 @@ public class SessionManagerImpl extends ISessionManager.Stub {
         }
     }
 
-    public void onSessionEnding(SessionImpl session) {
+    public boolean onSessionEnding(SessionImpl session) {
+        boolean accepted;
+        synchronized (this) {
+            accepted = this.currentSession == session && session.markEnding();
+        }
+        Log.i(TAG, "onSessionEnding sessionGeneration=" + session.getSessionGeneration()
+                + " accepted=" + accepted + " sessionStillCurrent="
+                + (this.currentSession == session)
+                + " listenerCount=" + this.sessionManagerListeners.size());
+        if (!accepted) return false;
+        int callbackIndex = 0;
         for (ISessionManagerListener listener : this.sessionManagerListeners) {
             try {
                 listener.onSessionEnding(session.getSessionProxy().getWrappedSession());
-            } catch (RemoteException e) {
+                Log.i(TAG, "onSessionEndingCallback index=" + callbackIndex
+                        + " callbackClass=" + getSessionListenerClass(listener) + " delivered=true");
+            } catch (RemoteException | RuntimeException e) {
+                Log.i(TAG, "onSessionEndingCallback index=" + callbackIndex
+                        + " callbackClass=" + getSessionListenerClass(listener) + " delivered=false");
                 Log.d(TAG, "Remote exception calling onSessionEnding: " + e.getMessage());
             }
+            callbackIndex++;
         }
+        return true;
     }
 
-    public void onSessionEnded(SessionImpl session, int error) {
-        this.currentSession = null;
-        this.setCastState(CastState.NOT_CONNECTED);
+    public boolean onSessionEnded(SessionImpl session, int error) {
+        boolean matchingCurrentSession;
+        boolean firstEnd;
+        synchronized (this) {
+            matchingCurrentSession = this.currentSession == session;
+            firstEnd = session.markEnded();
+            if (matchingCurrentSession && firstEnd) this.currentSession = null;
+        }
+        boolean deliver = matchingCurrentSession && firstEnd;
+        if (deliver) this.setCastState(CastState.NOT_CONNECTED);
+        Log.i(TAG, "onSessionEnded sessionGeneration=" + session.getSessionGeneration()
+                + " currentSessionMatched=" + matchingCurrentSession
+                + " firstEnd=" + firstEnd + " listenerDelivery=" + deliver
+                + " currentSessionPresentAfter=" + (this.currentSession != null) + " listenerCount="
+                + this.sessionManagerListeners.size());
+        if (!deliver) return false;
+        int callbackIndex = 0;
         for (ISessionManagerListener listener : this.sessionManagerListeners) {
             try {
                 listener.onSessionEnded(session.getSessionProxy().getWrappedSession(), error);
-            } catch (RemoteException e) {
+                Log.i(TAG, "onSessionEndedCallback index=" + callbackIndex
+                        + " callbackClass=" + getSessionListenerClass(listener) + " delivered=true");
+            } catch (RemoteException | RuntimeException e) {
+                Log.i(TAG, "onSessionEndedCallback index=" + callbackIndex
+                        + " callbackClass=" + getSessionListenerClass(listener) + " delivered=false");
                 Log.d(TAG, "Remote exception calling onSessionEnded: " + e.getMessage());
             }
+            callbackIndex++;
         }
+        return true;
+    }
+
+    SessionImpl getCurrentSessionForTest() {
+        return this.currentSession;
+    }
+
+    public synchronized SessionImpl getCurrentSession() {
+        return this.currentSession;
     }
 
     public void onSessionResuming(SessionImpl session, String sessionId) {
+        synchronized (this) {
+            if (this.currentSession == null) this.currentSession = session;
+            if (this.currentSession != session) return;
+        }
+        this.setCastState(CastState.CONNECTING);
         for (ISessionManagerListener listener : this.sessionManagerListeners) {
             try {
                 listener.onSessionResuming(session.getSessionProxy().getWrappedSession(), sessionId);
@@ -206,7 +371,10 @@ public class SessionManagerImpl extends ISessionManager.Stub {
     }
 
     public void onSessionResumeFailed(SessionImpl session, int error) {
-        this.currentSession = null;
+        synchronized (this) {
+            if (this.currentSession != session) return;
+            this.currentSession = null;
+        }
         this.setCastState(CastState.NOT_CONNECTED);
         for (ISessionManagerListener listener : this.sessionManagerListeners) {
             try {
@@ -218,6 +386,9 @@ public class SessionManagerImpl extends ISessionManager.Stub {
     }
 
     public void onSessionSuspended(SessionImpl session, int reason) {
+        synchronized (this) {
+            if (this.currentSession != session) return;
+        }
         this.setCastState(CastState.NOT_CONNECTED);
         for (ISessionManagerListener listener : this.sessionManagerListeners) {
             try {

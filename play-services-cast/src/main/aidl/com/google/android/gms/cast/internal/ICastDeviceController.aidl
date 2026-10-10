@@ -25,7 +25,7 @@ interface ICastDeviceController {
   oneway void setListener(ICastDeviceControllerListener listener) = 17;
   oneway void unregisterListener() = 18;
 
-  // Optional control extensions follow standard Cast SDK transactions.
+  // Downstream private extensions. Keep after the established SDK transactions.
   oneway void setMute(boolean mute) = 19;
   boolean isMute() = 20;
   double getVolume() = 21;

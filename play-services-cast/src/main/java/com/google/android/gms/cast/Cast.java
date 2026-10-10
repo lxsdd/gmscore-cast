@@ -165,6 +165,10 @@ public final class Cast {
             this.verboseLoggingEnabled = verboseLoggingEnabled;
         }
 
+        public CastDevice getCastDevice() {
+            return castDevice;
+        }
+
         @Deprecated
         public static Builder builder(CastDevice castDevice, Listener castListener) {
             return new Builder(castDevice, castListener);

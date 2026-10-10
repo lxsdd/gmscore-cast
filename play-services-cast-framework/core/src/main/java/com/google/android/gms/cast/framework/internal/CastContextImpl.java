@@ -24,6 +24,7 @@ import android.util.Log;
 
 import androidx.mediarouter.media.MediaControlIntent;
 import androidx.mediarouter.media.MediaRouteSelector;
+import androidx.mediarouter.media.MediaRouter;
 
 import com.google.android.gms.cast.CastMediaControlIntent;
 import com.google.android.gms.cast.framework.CastOptions;
@@ -47,6 +48,7 @@ public class CastContextImpl extends ICastContext.Stub {
     private Context context;
     private CastOptions options;
     private IMediaRouter router;
+    private MediaRouterCallbackImpl mediaRouterCallback;
     private Map<String, ISessionProvider> sessionProviders = new HashMap<String, ISessionProvider>();
     public ISessionProvider defaultSessionProvider;
 
@@ -56,6 +58,9 @@ public class CastContextImpl extends ICastContext.Stub {
         this.context = (Context) ObjectWrapper.unwrap(context);
         this.options = options;
         this.router = router;
+        Log.i(TAG, "constructorEntry clientPackage="
+                + (this.context == null ? "<none>" : this.context.getPackageName())
+                + " routerPresent=" + (router != null));
         for (Map.Entry<String, IBinder> entry : sessionProviders.entrySet()) {
             this.sessionProviders.put(entry.getKey(), ISessionProvider.Stub.asInterface(entry.getValue()));
         }
@@ -64,6 +69,17 @@ public class CastContextImpl extends ICastContext.Stub {
         String defaultCategory = CastMediaControlIntent.categoryForCast(receiverApplicationId);
 
         this.defaultSessionProvider = this.sessionProviders.get(defaultCategory);
+        if (this.defaultSessionProvider == null) {
+            // The provider map can be keyed by the full control category, which carries extra
+            // namespace/flag suffixes (e.g. ".../CC1AD845///ALLOW_IPV6"), rather than the bare
+            // categoryForCast(appId). Fall back to matching by category prefix.
+            for (Map.Entry<String, ISessionProvider> entry : this.sessionProviders.entrySet()) {
+                if (entry.getKey() != null && entry.getKey().startsWith(defaultCategory)) {
+                    this.defaultSessionProvider = entry.getValue();
+                    break;
+                }
+            }
+        }
 
         // TODO: This should incorporate passed options
         this.mergedSelector = new MediaRouteSelector.Builder()
@@ -71,11 +87,33 @@ public class CastContextImpl extends ICastContext.Stub {
             .addControlCategory(MediaControlIntent.CATEGORY_REMOTE_PLAYBACK)
             .addControlCategory(defaultCategory)
             .build();
+
+        // Observe route selection so that choosing a Cast route actually starts a session.
+        // This goes through the app's MediaRouterProxy (IMediaRouter), which runs androidx
+        // MediaRouter in the app process; touching MediaRouter directly from the dynamite would
+        // fail with a Resources$NotFoundException. On selection the app invokes
+        // MediaRouterCallbackImpl.onRouteSelected(), which starts the session.
+        try {
+            Log.i(TAG, "routeCallbackRegistrationAttempt clientPackage="
+                    + this.context.getPackageName());
+            this.mediaRouterCallback = new MediaRouterCallbackImpl(this);
+            this.router.registerMediaRouterCallbackImpl(this.mergedSelector.asBundle(),
+                    this.mediaRouterCallback);
+            this.router.addCallback(this.mergedSelector.asBundle(),
+                    MediaRouter.CALLBACK_FLAG_REQUEST_DISCOVERY);
+            Log.i(TAG, "routeCallbackRegistered clientPackage=" + this.context.getPackageName());
+        } catch (RemoteException e) {
+            Log.w(TAG, "Failed to register media router callback: " + e.getMessage());
+        }
     }
 
     @Override
     public Bundle getMergedSelectorAsBundle() throws RemoteException {
         return this.mergedSelector.asBundle();
+    }
+
+    String getClientPackageName() {
+        return this.context.getPackageName();
     }
 
     @Override
@@ -137,6 +175,10 @@ public class CastContextImpl extends ICastContext.Stub {
 
     public IMediaRouter getRouter() {
         return this.router;
+    }
+
+    MediaRouterCallbackImpl getMediaRouterCallback() {
+        return this.mediaRouterCallback;
     }
 
     public MediaRouteSelector getMergedSelector() {
