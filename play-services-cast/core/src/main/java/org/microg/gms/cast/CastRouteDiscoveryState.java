@@ -116,6 +116,15 @@ final class CastRouteDiscoveryState<T> {
         categories.add(category);
     }
 
+    /**
+     * A valid passive request still carries the sender's route selector.
+     * Do not clear its categories merely because active DNS-SD scanning ended.
+     * Only an invalid/null request clears the selector.
+     */
+    synchronized boolean replaceRequestCategories(boolean validRequest, List<String> requested) {
+        return replaceCategories(validRequest ? requested : null);
+    }
+
     /** A chooser reopen is a new selector, not an append-only filter history. */
     synchronized boolean replaceCategories(List<String> requested) {
         List<String> next = new ArrayList<>();
